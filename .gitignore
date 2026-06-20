@@ -1,0 +1,46 @@
+# --- DATA PROTECTION (SCRAPPED DATA) ---
+**/output/
+**/*.csv
+**/*.json
+!package.json
+!tsconfig.json
+!components.json
+!vercel.json
+projects_registry.json
+
+# --- SECRETS & CREDENTIALS ---
+**/.env
+**/.env.*
+
+**/ssh.md
+**/credentials.*
+**/proxies.txt
+**/Proxy_Manager/Data/
+
+# --- ARCHIVES & OLD VERSIONS (EXCLUDED FROM V2.5) ---
+Backend/Backend-v2/
+Backend/backend-archive_v1/
+Backend/planning/
+inbox/
+
+# --- OS & IDE JUNK ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- BUILD & RUNTIME JUNK ---
+__pycache__/
+*.py[cod]
+**/.venv/
+**/.ruff_cache/
+node_modules/
+Frontend/.react-router/
+Frontend/build/
+Frontend/dist/
+
+# --- DEVELOPER WORKSPACE (AI AGENTS & INTERNAL DEV DOCS) ---
+agent_context/
+dev_insights/
+dev_insight/
+.agents/

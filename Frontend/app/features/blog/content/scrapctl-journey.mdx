@@ -1,0 +1,655 @@
+# Scrapctl — From a Retail Scraper to an Autonomous Data Agent
+
+**By Lead Architect · June 2026**
+
+---
+
+## 📖 Publication Index
+*   **Chapter 1: The Genesis of Scrapctl**
+    *   1.1 The Landscape of Ingestion Pipelines
+    *   1.2 Frustration as a Spec: Why Scrapctl?
+*   **Chapter 2: Phase-Wise Evolution & Architecture**
+    *   2.1 Phase 1: Decoupled Controllers & WebSockets Telemetry
+    *   2.2 Phase 2: Generic Parsing Engines & Job Queues
+    *   2.3 Phase 3: Dynamic LLM Sandboxing & Intent Processing
+*   **Chapter 3: Core Concurrency & Engineering Challenges**
+    *   3.1 OS-Level Multithreading vs. Cooperative AsyncIO Event Loops
+    *   3.2 DOM Reconstruction & JSON API Sniffing
+    *   3.3 Comparative Analysis: Why Scrapctl Differs from Apify and Octoparse
+*   **Chapter 4: The Developer’s Reference Cookbook (Internal Reference)**
+    *   4.1 Bypassing Bot Walls: Sticky Proxies & Staggered Handshakes
+    *   4.2 Resolving Thread Stalls: urllib3 Retries vs. Manager Orchestration
+    *   4.3 High-Density Buffering: Double-Buffered Telemetry Flushes
+    *   4.4 React UI Bottlenecks: Throttling SSE Stream Rendering to 100ms
+    *   4.5 Security Hardening: Patches for IDOR, Path Traversal, and SSRF
+    *   4.6 Provider Decoupling: The Factory Pattern for Cloud Independence
+    *   4.7 Execution Pipeline: Class-Based Workers, Managers, and Trackers
+    *   4.8 Request Routing & Task Classification: The Controller Engine
+    *   4.9 Anti-Fingerprinting & Advanced Bot Evasion
+*   **Chapter 5: Project Milestones & Current Status**
+
+---
+
+# Chapter 1: The Genesis of Scrapctl
+
+*Summary: Scraping web data is the primary bottleneck for live AI agents; Scrapctl was built to turn fragile, single-use scripts into a unified data controller.*
+
+### 1.1 The Landscape of Ingestion Pipelines
+Large Language Models (LLMs) and agentic workflows are only as useful as the data they can query. An AI agent tasked with real-time analytics (such as price monitoring, market research, or stock updates) cannot rely on static databases or old training weights—it needs access to the live web.
+
+However, extracting data from modern e-commerce sites is notoriously complex. Modern Single Page Applications (SPAs) load content dynamically via nested AJAX calls, and targets actively block automated traffic using rate limits, CAPTCHAs, and IP reputation systems. Standard scripts are brittle: they collapse the moment the target site re-arranges its CSS layout or implements standard security updates.
+
+### 1.2 Frustration as a Spec: Why Scrapctl?
+Scrapctl (*Scrap Control*) was born out of frustration with existing workflows. Most off-the-shelf scraping tools are either too simple (requiring manual visual mapping) or too heavy (massive configurations that block custom integrations). 
+
+I wanted to build a modular system where a developer could spin up concurrent workers, coordinate proxy rotation, monitor execution logs via WebSockets in real time, and save clean CSV/JSON results without rebuilding the underlying network engine for every target.
+
+> [!NOTE]
+> **Key Takeaway**: Web scraping is not just about downloading HTML. It is about connection resilience, concurrency orchestration, and transforming unstructured web pages into clean, schema-aligned data objects.
+
+---
+
+# Chapter 2: Phase-Wise Evolution & Architecture
+
+*Summary: A look at the structural changes of Scrapctl, from the Phase 1 WebSocket dashboard to the Phase 3 LLM sandbox injection engine.*
+
+### 2.1 Phase 1: Decoupled Controllers & WebSockets Telemetry
+Phase 1 focuses on a highly concurrent scraping engine targeting major retail electronics sites. The core design pattern is **Separation of Concerns**: task definitions are isolated in target **Controllers** (e.g. `TargetController`), execution logic is handled by a generic **Engine** (`DumbManager` / `AsyncManager`), and communication uses **FastAPI Router Routes** streaming status updates to a React frontend.
+
+```
+[Phase 1 Data Flow]
+User ──► React Dashboard (Vercel) ──► WebSocket ──► FastAPI Backend (Render)
+                                                        │
+                                                        ▼
+                                                Dumb/Async Manager
+                                            (Rotates Sticky Proxies)
+                                                        │
+                                                        ▼
+                                                 Target Electronics API
+```
+
+[ARCHITECTURE DIAGRAM — PHASE 1]
+
+> [!TIP]
+> **Why this matters**: Isolating the scraper code (Controller) from the thread manager (Engine) keeps the codebase modular. Adding a new site only requires registering its parameters in the target controller registry.
+
+### 2.2 Phase 2: Generic Parsing Engines & Job Queues
+Phase 2 removes target-specific controllers, turning Scrapctl into a generic scraping engine. Users provide an arbitrary URL and an output schema definition. The request is pushed to a background worker queue, executed by headless engines, and stored in a persistent relational database.
+
+```
+[Phase 2 Data Flow]
+User Target URL ──► FastAPI Router ──► Redis Queue ──► Celery/BullMQ Worker
+                                                               │
+                                                               ▼
+                                                       Generic Engine
+                                                   (Playwright Parser)
+                                                               │
+                                                               ▼
+                                                         PostgreSQL DB
+```
+
+[ARCHITECTURE DIAGRAM — PHASE 2]
+
+> [!IMPORTANT]
+> **Key Takeaway**: Scaling beyond a single domain requires a persistent database (PostgreSQL) and a background worker queue (Redis/Celery) so large-scale ingestion jobs do not tie up the web application server.
+
+### 2.3 Phase 3: Dynamic LLM Sandboxing & Intent Processing
+Phase 3 represents the target vision: an autonomous data extraction agent. The user defines the query in natural language. An LLM agent translates this query into custom Playwright/HTTP scraping code, injects it into a secure server sandbox, runs the scraper, and normalizes the output.
+
+```
+[Phase 3 Data Flow]
+Plain Text Query ──► LLM Intent Compiler ──► Python Script ──► Execution Sandbox
+                                                                (gVisor / Kata)
+                                                                       │
+                                                                       ▼
+                                                              Validated JSON
+```
+
+[ARCHITECTURE DIAGRAM — PHASE 3]
+
+> [!WARNING]
+> **Risk Warning**: Executing dynamic code generated at runtime requires strict security sandboxing to prevent the AI from compromising host server resources.
+
+---
+
+# Chapter 3: Core Concurrency & Engineering Challenges
+
+*Summary: Deep dive into python concurrency models, DOM layout sniffing, and how Scrapctl compares to other scraping solutions.*
+
+### 3.1 OS-Level Multithreading vs. Cooperative AsyncIO Event Loops
+We compared two distinct concurrency models to manage network connections:
+
+#### 1. OS-Level Multithreading (`ThreadPoolExecutor`)
+*   **Mechanism**: Spawns multiple physical OS threads. When thread A blocks on a socket read (`requests.get()`), the OS scheduler switches execution to thread B.
+*   **Evaluation**: Good for parsing complex DOM structures or running synchronous calculations. However, context switching and thread memory limits concurrency to about 30–50 parallel workers.
+
+#### 2. Cooperative Single-Threaded Event Loop (`asyncio`)
+*   **Mechanism**: Runs a single loop using non-blocking calls (`httpx.AsyncClient`). The single thread initiates requests and registers callbacks, switching contexts at `await` boundaries.
+*   **Evaluation**: Incredibly lightweight for network-heavy tasks. Because workers spend most of their time waiting for proxy responses, AsyncIO handles hundreds of concurrent connections on a single thread.
+
+### 3.2 DOM Reconstruction & JSON API Sniffing
+Instead of loading heavy, headful browser engines to click on elements, we analyzed target network traffic to find their private backend APIs:
+*   We bypassed the target's frontend React hydration and mapped their search services endpoint: `/searchservices/v1/category/{id}`.
+*   We parsed their raw paginated responses directly, avoiding the need to execute CSS queries or XPath selectors on the DOM.
+*   This approach reduced task payload size by over 90% and improved raw speed significantly.
+
+### 3.3 Comparative Analysis: Why Scrapctl Differs from Apify and Octoparse
+*   **Octoparse / ParseHub**: Require users to manually map workflows in a visual editor. If the page layout changes, the layout template breaks.
+*   **Apify / ScrapingBee**: Provide developer-friendly SDKs, but developers must host the scripts, build their own pipelines, and maintain target scrapers.
+*   **Scrapctl**: Bridges the gap by mapping natural-language queries directly to dynamically compiled, self-healing code sandboxes.
+
+---
+
+# Chapter 4: The Developer’s Reference Cookbook (Internal Reference)
+
+*Summary: An in-depth engineering playbook covering python concurrency event loops, cloud decoupling patterns, ingestion pipeline states, persistent socket worker loops, telemetry flushes, browser fingerprinting/JA3 evasion, and security audit patches.*
+
+### 4.1 Concurrency Models: OS-Level Multithreading vs. Cooperative AsyncIO
+
+To build a high-performance scraping system in Python, one must understand how CPython schedules execution. The core challenge is python's **Global Interpreter Lock (GIL)**, a mutual-exclusion lock that prevents multiple physical threads from executing Python bytecodes at once.
+
+```
+[GIL Locking Behavior under Multithreading]
+OS Thread 1 (Python Code)  ──► [ Acquires GIL ] ──► Executes CPU instruction ──► [ Releases GIL ]
+OS Thread 2 (Python Code)  ─────────────────────────────────────────── WAIT ──► [ Acquires GIL ] ──► Executes
+```
+
+#### 1. OS-Level Multithreading (`ThreadPoolExecutor`)
+*   **Mechanism**: Spawns physical OS-level threads. Although only one thread can execute Python bytecode at a time, Python releases the GIL during blocking system calls (such as `socket.recv` during network requests, or `os.read` during disk inputs). The operating system's scheduler preemptively context-switches between threads.
+*   **Memory Footprint**: Python allocates a significant stack size (often 8MB default, though configurable) and system handles for each thread.
+*   **Context-Switch Overhead**: Preemptive context switching requires saving and restoring CPU registers, which consumes CPU cycles when thread counts exceed 50.
+*   **Library Compatibility**: Compatible with synchronous, sequential blocking libraries (e.g. `requests`, `urllib3`, `BeautifulSoup4`).
+
+#### 2. Cooperative Single-Threaded Event Loop (`asyncio`)
+*   **Mechanism**: Operates on a single physical thread using a non-blocking event loop (e.g., using selector modules backing OS-level `epoll` on Linux or `kqueue` on macOS). Context switching is cooperative: tasks explicitly yield control back to the event loop using the `await` keyword.
+*   **Memory Footprint**: Extremely lightweight. Creating a coroutine task allocates only about 2KB of memory in memory frame states.
+*   **Context-Switch Overhead**: The event loop switches tasks in user-space at near-zero CPU cost. There are no OS registers to save or preemptive interrupts to manage.
+*   **Event Loop Blocking Danger**: If a coroutine performs a heavy synchronous operation (like calling a CPU-bound `json.loads` on a 50MB string, or calling a blocking `time.sleep()`), the entire event loop freezes. All other concurrent scrapers starve because the single thread cannot switch tasks until the blocking call returns.
+
+#### Concurrency Comparison Matrix
+
+| Metric | OS Multithreading (`ThreadPoolExecutor`) | Cooperative Event Loop (`asyncio`) |
+| :--- | :--- | :--- |
+| **Typical Memory per Worker** | ~8 MB | ~2 KB |
+| **Maximum Safe Concurrency** | 30 – 50 threads | 10,000+ coroutines |
+| **Context Switch Cost** | Moderate (OS-Level Preemptive) | Negligible (User-Space Cooperative) |
+| **GIL Behavior** | Released on network IO socket blocks | Not applicable (runs on a single thread) |
+| **Blocking Code Safety** | Safe (stalls one thread, others run) | Fatal (stalls the entire event loop) |
+| **Code Architecture** | Straightforward, standard synchronous | "Async Poison" (infects the entire call stack) |
+| **ScrapCTL Use Case** | DOM parsing, legacy synchronous targets | High-speed, high-density HTTP/2 ingestion |
+
+---
+
+### 4.2 Decoupled Architectures: Cloud-Agnostic Storage & DB Abstractions
+
+Decoupling is the architectural practice of isolating business logic from infrastructure components. In ScrapCTL, the scraping workers should never directly reference cloud providers (like Amazon AWS S3, Vercel Blob, or Supabase). This ensures that the application can run in a zero-dependency local development sandbox (using SQLite and local folders) or be deployed to a cloud serverless runtime without modifying the extraction loops.
+
+We achieved this by defining abstract interfaces in [base.py](Backend/shared/providers/base.py):
+
+```python title="Backend/shared/providers/base.py"
+from abc import ABC, abstractmethod
+from typing import Any
+
+class DatabaseProvider(ABC):
+    @abstractmethod
+    def create_all_tables(self) -> None:
+        """Initializes tables in the persistence engine."""
+        pass
+
+    @abstractmethod
+    def get_session(self) -> Any:
+        """Returns a context manager database session wrapper."""
+        pass
+
+class StorageProvider(ABC):
+    @abstractmethod
+    def upload_file(self, local_path: str, remote_path: str, bucket_name: str = None) -> bool:
+        """Uploads a local file to storage and returns a success boolean."""
+        pass
+```
+
+Concrete implementations are defined in their respective module files. For example, `VercelBlobStorageProvider` implements the upload using direct, lightweight REST calls instead of massive AWS SDK binaries:
+
+```python title="Backend/shared/providers/storage_provider.py"
+import os
+import requests
+from shared.providers.base import StorageProvider
+
+class VercelBlobStorageProvider(StorageProvider):
+    def __init__(self, token: str = None):
+        self.token = token or os.getenv("BLOB_READ_WRITE_TOKEN", "")
+        self.api_url = "https://blob.vercel-api.com"
+
+    def upload_file(self, local_path: str, remote_path: str, bucket_name: str = None) -> bool:
+        if not os.path.exists(local_path):
+            return False
+        with open(local_path, "rb") as f:
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "x-api-version": "1"
+            }
+            # Stream upload payload directly to Vercel's Edge endpoint
+            resp = requests.put(f"{self.api_url}/{remote_path}", data=f, headers=headers)
+            return resp.status_code == 200
+```
+
+The application loads these providers at runtime using a module-level cached singleton Factory in [factory.py](Backend/shared/providers/factory.py):
+
+```python title="Backend/shared/providers/factory.py"
+import os
+from shared.providers.base import DatabaseProvider, StorageProvider
+from shared.providers.db_provider import SQLModelDatabaseProvider
+from shared.providers.storage_provider import S3StorageProvider, LocalStorageProvider, VercelBlobStorageProvider
+
+_db_instance = None
+_storage_instance = None
+
+def get_db_provider() -> DatabaseProvider:
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = SQLModelDatabaseProvider() # Handles both Postgres/SQLite via DATABASE_URL
+    return _db_instance
+
+def get_storage_provider() -> StorageProvider:
+    global _storage_instance
+    if _storage_instance is None:
+        storage_type = os.getenv("STORAGE_PROVIDER", "local").lower()
+        if storage_type == "s3":
+            _storage_instance = S3StorageProvider()
+        elif storage_type == "vercel":
+            _storage_instance = VercelBlobStorageProvider()
+        else:
+            _storage_instance = LocalStorageProvider() # Default to local disk (Backend/output/storage/)
+    return _storage_instance
+```
+
+> [!TIP]
+> **Why this matters**: Downstream modules like `JobTracker` perform files syncs by simply writing: `get_storage_provider().upload_file(file_path, remote_path)`. The engine is completely isolated from vendor-specific credentials or connection logic.
+
+---
+
+### 4.3 Task Ingestion Pipeline: Intent Parsing, Input Extraction, & Manager Routing
+
+The ScrapCTL ingestion flow decomposes user requests into executable parameters in a strict three-tier pipeline:
+
+```
+[Ingestion Pipeline Flow]
+Client API Request ──► Controller (Intent & Registry Match) ──► InputExtractor (Schema Normalization)
+                                                                       │
+                                                                       ▼
+                                                             Task Expander (Page Arrays)
+                                                                       │
+                                                                       ▼
+                                                             Manager (Pool Execution)
+```
+
+#### Step 1: Controller Matching & Intent Processing
+When a request hits `POST /api/task/execute` in [routes.py](Backend/features/task_execution/routes.py), it is classified by its target. The router retrieves the registered adapter, such as the target controller registry (e.g. for retail tech portals). The controller maps the `task_type` request parameters against the target's `TASK_REGISTRY`.
+
+#### Step 2: Input Extraction & Column Selection
+The user can supply tasks in multiple formats: plain text boxes, single URL strings, or CSV file uploads. The `InputExtractor` in [input_extractor.py](Backend/engine/input_extractor.py) is a generic static class that normalizes these formats into standard string lists:
+
+*   **Raw List**: Cleans lines from text boxes, ignoring whitespace.
+*   **Target CSV Columns**: Standardizes parsing via `csv.DictReader` to pull targeted header keys (e.g. searching for Category `id` or Product `url` fields). If no column is selected, it treats each line as a string.
+
+```python title="Backend/engine/input_extractor.py"
+class InputExtractor:
+    @staticmethod
+    def extract(input_type: str, input_data: list, file_content: str = "", target_column: str = "") -> list[str]:
+        if input_type == "raw_list":
+            return [x.strip() for x in input_data if x.strip()]
+        elif input_type == "device_upload_csv":
+            import csv, io
+            if not target_column:
+                return [line.strip() for line in file_content.split("\n") if line.strip()]
+            reader = csv.DictReader(io.StringIO(file_content))
+            return [row[target_column].strip() for row in reader if row.get(target_column, "").strip()]
+        # ... other configurations (single_url, text files)
+```
+
+#### Step 3: Task Expansion & Parameter Bundling
+Once the inputs are normalized, the target controller translates them into a pipeline bundle:
+1.  **`t_list`**: The collection of individual execution tasks. For categories, a helper (`expand_categories_to_pages`) generates numbered requests across multiple offsets/pages.
+2.  **`scrape_func`**: The targeted execution function (such as `get_product_page_async`).
+3.  **`call_kwargs`**: Validated parameters (e.g. execution timeouts, custom headers, crawl limits).
+4.  **`session_factory`**: The connection generator wrapper (e.g. `create_async_api_client`).
+5.  **`workers`**: Thread/coroutine pool sizing.
+6.  **`task_groups`**: Group mappings for logical tracking.
+
+---
+
+### 4.4 The State Machine: JobTracker & Thread-Safe Logging
+
+The `JobTracker` in [job_tracker.py](Backend/engine/job_tracker.py) is the state machine orchestrator for execution sessions. It maintains queues, logs outcomes, and broadcasts live progress events.
+
+```
+[JobTracker State Transitions]
+    [ PENDING ]
+         │
+         ▼
+    [ STARTED ] ──► WebSocket event (live dashboard update)
+         │
+         ├───► [ SUCCESS ] ─────────────────────────┐
+         │                                          ▼
+         └───► [ SOFT_FAIL ] (Attempt < Max) ──► Re-queued to [ PENDING ]
+                 │
+                 ▼ (Attempt >= Max)
+               [ HARD_FAIL ] ───────────────────────► Local JSONL buffer
+```
+
+To coordinate concurrent workers without corruption, all mutation operations use an internal thread lock:
+
+```python title="Backend/engine/job_tracker.py"
+class JobTracker:
+    def __init__(self, session_id: str, ui_queue, max_try: int = 3):
+        self.session_id = session_id
+        self.ui_queue = ui_queue
+        self.max_try = max_try
+        self.q = deque()
+        self.logs = {} # maps task keys to _LogEntry
+        self.lock = threading.Lock()
+
+    def init_tasks(self, t_list: list):
+        with self.lock:
+            for t in t_list:
+                key = str(t)
+                self.q.append(t)
+                self.logs[key] = _LogEntry(t, self.max_try)
+
+    def reffer_as_success(self, t: Any, result: Any, latency: float, proxy: str = None, worker_id: str = None):
+        key = str(t)
+        with self.lock:
+            if key in self.logs:
+                log = self.logs[key]
+                log.result = result
+                log.metadata.latency_seconds = latency
+                log.metadata.proxy_used = proxy
+                log.metadata.attempt += 1
+                self._push_event(key, "SUCCESS", result=result, worker_id=worker_id)
+                self._log_outcome(key, "SUCCESS", latency, proxy, result=result)
+```
+
+The UI event notifications are pushed directly to `self.ui_queue`. The server streams these updates to the React frontend via a WebSocket connection, keeping the web client updated in real time.
+
+---
+
+### 4.5 Execution Runtimes: Worker Loops & Persistent Sockets
+
+To avoid resource starvation, workers must manage network connections efficiently. A major issue in scraping is **Connection storms**: initializing a new network connection client for every single page request. This triggers massive TCP handshake overhead and causes proxy gateways to reject connections with `407 Proxy Authentication Required` codes.
+
+Our solution initializes a single persistent connection (`httpx.AsyncClient` for async, `requests.Session` for sync) *outside* the task loop. The client is passed into individual scraper tasks, maintaining persistent TCP tunnels (HTTP Keep-Alive) across multiple calls.
+
+Here is a side-by-side comparison of the worker runtimes in `AsyncManager` and `DumbManager`:
+
+#### 1. Cooperative Loop (`AsyncManager` in async_manager.py)
+```python
+async def _worker_coro(worker_id: str, tracker: JobTracker, scrape_func: Callable, client_factory: Callable, rotator, call_kwargs: dict, worker_index: int):
+    # Stagger startup to prevent connection storm on proxies
+    if worker_index > 0:
+        await asyncio.sleep(worker_index * 0.25)
+
+    proxy_str = rotator.get_proxy() if rotator else None
+    client = client_factory(proxy=proxy_str, **call_kwargs) # Persistent client
+    consecutive_failures = 0
+
+    try:
+        while True:
+            # Atomic Queue Retrieval
+            with tracker.lock:
+                if not tracker.q or getattr(tracker, "stopped", False):
+                    break
+                t = tracker.q.popleft()
+                attempt = tracker.logs[str(t)].metadata.attempt
+
+            tracker._push_event(str(t), "STARTED", worker_id=worker_id)
+            
+            # Request Jitter
+            delay = call_kwargs.get("delay")
+            if delay:
+                await asyncio.sleep(float(delay) * (0.5 + random.random()))
+
+            start = time.time()
+            try:
+                result, meta = await scrape_func(t=t, client=client, **call_kwargs)
+                latency = time.time() - start
+                
+                if meta and meta.get("success"):
+                    tracker.reffer_as_success(t, result, latency, proxy=proxy_str, worker_id=worker_id)
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    # Rotate client and proxy if failures pile up
+                    if rotator and consecutive_failures >= 3:
+                        await client.aclose()
+                        proxy_str = rotator.get_proxy()
+                        client = client_factory(proxy=proxy_str, **call_kwargs)
+                        consecutive_failures = 0
+                    await _handle_failure(tracker, t, attempt, meta.get("error"), latency, proxy_str, worker_id)
+            except Exception as e:
+                # Same failure rotation
+                ...
+    finally:
+        await client.aclose()
+```
+
+#### 2. OS Thread Worker (`DumbManager` in dumb_manager.py)
+```python
+def _scraper_work(tracker: JobTracker, scrape_func: Callable, session_factory: Callable, rotator, call_kwargs: dict):
+    # Session initialized once per worker thread
+    session = session_factory(**call_kwargs)
+    proxy_str = rotator.get_proxy() if rotator else None
+    session.proxies = _build_proxy(proxy_str)
+    consecutive_failures = 0
+
+    while True:
+        with tracker.lock:
+            if not tracker.q or getattr(tracker, "stopped", False):
+                break
+            t = tracker.q.popleft()
+            attempt = tracker.logs[str(t)].metadata.attempt
+
+        tracker._push_event(str(t), "STARTED")
+        
+        delay = call_kwargs.get("delay")
+        if delay:
+            time.sleep(float(delay) * (0.5 + random.random())) # Synchronous sleep
+
+        start = time.time()
+        try:
+            # Sync call
+            result, meta = scrape_func(t=t, proxy=session.proxies, session=session, **call_kwargs)
+            latency = time.time() - start
+            
+            if meta and meta.get("success"):
+                tracker.reffer_as_success(t, result, latency, proxy=proxy_str)
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if rotator and consecutive_failures >= 3:
+                    proxy_str = rotator.get_proxy()
+                    session = session_factory(**call_kwargs)
+                    session.proxies = _build_proxy(proxy_str)
+                    consecutive_failures = 0
+                _handle_failure(tracker, t, attempt, meta.get("error"), latency, proxy_str)
+        except Exception as e:
+            ...
+```
+
+---
+
+### 4.6 Defensive Engineering: Double-Buffered Telemetry & React State Throttling
+
+High-throughput execution pools run the risk of overwhelming external resources. ScrapCTL implements two layers of defensive throttling to keep operations running smoothly:
+
+#### 1. In-Memory Double-Buffered Logging
+Writing log updates directly to a relational database or an S3 bucket on every task success or failure creates a performance bottleneck due to network write latency.
+
+`JobTracker` solves this with an in-memory double-buffer. Logs are appended to `JobTracker.GLOBAL_LOGS[session_id]`. Once the collection reaches 100 entries, a background thread flushes the buffer to local JSONL files. Final uploads are decoupled: files are stored on disk, and the user can manually sync logs to Supabase/S3, eliminating S3 API latency during scraping runs.
+
+```python
+# Write to memory list
+JobTracker.GLOBAL_LOGS[self.session_id].append(log_entry)
+
+# Flush chunk on reaching threshold
+if len(JobTracker.GLOBAL_LOGS[self.session_id]) >= 100:
+    self._flush_logs_to_file()
+```
+
+#### 2. React UI Rendering Throttling
+Streaming 150 WebSocket events per second to a browser will freeze the React main thread if the table re-renders on every event.
+
+We updated the frontend state store to accumulate updates in a throttled array queue. Instead of forcing immediate re-renders, updates are flushed to the DOM at 100ms intervals using a throttling container, reducing browser layout recalculation triggers by over 80%.
+
+```typescript
+// Throttled Zustand UI implementation
+const useTaskStore = create((set) => ({
+  updatesQueue: [],
+  flushQueue: () => set((state) => {
+    if (state.updatesQueue.length === 0) return {};
+    // Apply updates in a single batch re-render
+    const newLogs = { ...state.logs };
+    state.updatesQueue.forEach(update => {
+      newLogs[update.task_id] = update;
+    });
+    return { logs: newLogs, updatesQueue: [] };
+  }),
+  queueUpdate: (update) => set((state) => ({
+    updatesQueue: [...state.updatesQueue, update]
+  }))
+}));
+
+// Flush queue every 100ms
+setInterval(() => {
+  useTaskStore.getState().flushQueue();
+}, 100);
+```
+
+---
+
+### 4.7 Bot Evasion: Anti-Fingerprinting, JA3 Handshakes, & Proxy Rotation
+
+Modern web platforms implement Cloudflare, Akamai, or Datadome firewalls that identify and block default Python client fingerprints. Bypassing these filters requires mimicking actual browser behavior.
+
+#### 1. Header Order Emulation
+Web application firewalls (WAFs) analyze the exact order of keys in HTTP headers. Standard Python dictionaries hash keys unpredictably, generating header patterns that do not match web browsers.
+
+We solve this by passing headers as lists of tuples to `httpx.AsyncClient` or using specialized libraries like `curl_cffi` to preserve the precise order matching a Chrome profile:
+
+```python
+chrome_headers = [
+    ("Host", "www.electra-retail.com"),
+    ("Connection", "keep-alive"),
+    ("sec-ch-ua", '"Google Chrome";v="125", "Chromium";v="125"'),
+    ("accept", "application/json, text/plain, */*"),
+    ("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
+    ("sec-fetch-site", "same-origin"),
+    ("sec-fetch-mode", "cors"),
+    ("referer", "https://www.electra-retail.com/"),
+]
+# Pass as ordered list of tuples
+client = httpx.AsyncClient(headers=chrome_headers)
+```
+
+#### 2. TLS/JA3 Fingerprint Evasion
+During the initial TLS handshake, the client sends a `Client Hello` packet containing lists of cipher suites, TLS extensions, and elliptic curve formats. WAFs compute an MD5 hash of these parameters, called a **JA3 Fingerprint**. Because Python's `ssl` library uses different cipher settings than Chrome, its JA3 signature is easily flagged as a bot.
+
+```
+[TLS JA3 Handshake Verification]
+Python Client ──► [ TLS Client Hello (Python Ciphers) ] ──► WAF ──► JA3: 8de54f... (BLOCKED)
+Impersonated  ──► [ TLS Client Hello (Chrome Ciphers) ] ──► WAF ──► JA3: 56fa72... (ALLOWED)
+```
+
+We bypass this in ScrapCTL using two techniques:
+*   **HTTP/2 ALPN Negotiation**: Enabling HTTP/2 (`http2=True` in `httpx.AsyncClient`) changes the TLS handshake footprint, using ALPN negotiation to negotiate cipher streams similar to browsers.
+*   **Impersonation Libraries**: For high-security targets, we swap the standard client factory to use `curl_cffi`, which links directly to browser-compiled NSS/OpenSSL configurations:
+    ```python
+    from curl_cffi import requests
+    # Under-the-hood bindings mimic Chrome JA3 fingerprint
+    response = requests.get("https://target.com", impersonate="chrome120")
+    ```
+
+#### 3. Proxy Rotation: Sticky Sessions vs. Round-Robin
+*   **Round-Robin (Rotating)**: Changes the proxy IP on every request. Ideal for high-throughput single-page scraping, but blocks session-based single-page applications because different source IPs trigger security reviews.
+*   **Sticky Sessions**: Keeps the same proxy IP for a worker across 3+ page requests. This maintains consistent cookie footprints and session persistence. In ScrapCTL, we bind a proxy to a worker loop, only rotating it if we hit a consecutive failure limit ($3$).
+
+#### 4. Request Jitter
+Fixed delay intervals are flagged by behavior-based firewalls. ScrapCTL randomizes delays to break timing analysis patterns:
+
+```python
+Jitter Delay = Base Delay * (0.5 + random())
+```
+
+This randomizes delays from 50% to 150% of the target interval, mimicking human-like browsing patterns.
+
+---
+
+### 4.8 Security Post-Mortem: IDOR, Path Traversal, & SSRF Resolutions
+
+During our security audit, we identified and patched three vulnerabilities:
+
+#### 1. Insecure Direct Object Reference (IDOR)
+*   **Vulnerability**: The task execution endpoint accepted a `project_file_id` and loaded the file from disk without verifying that the requesting client owned it.
+*   **Patch**: We verified file metadata ownership in [routes.py](Backend/features/task_execution/routes.py) by comparing the file owner's `browser_id` against the client's `x_browser_id` header before execution:
+
+```python
+# Before (Vulnerable)
+item = get_project_file_by_id(req.project_file_id)
+# After (Patched)
+item = get_project_file_by_id(req.project_file_id)
+if x_browser_id and item.get("browser_id") and item.get("browser_id") != x_browser_id:
+    raise HTTPException(status_code=403, detail="Access denied: Ownership mismatch on project file.")
+```
+
+#### 2. Directory Traversal
+*   **Vulnerability**: Project file managers created and renamed folders using raw string concatenation, allowing users to escape the sandboxed output directory using paths like `../../`.
+*   **Patch**: We enforced path checks in [manager.py](Backend/features/projects/manager.py) using `os.path.abspath` to verify that the resolved path is located within the parent sandbox directory:
+
+```python
+# Before (Vulnerable)
+target_path = os.path.join(parent_path, user_provided_name)
+# After (Patched)
+resolved_path = os.path.abspath(os.path.join(parent_path, user_provided_name))
+resolved_parent = os.path.abspath(parent_path)
+if not resolved_path.startswith(resolved_parent) or resolved_path == resolved_parent:
+    raise ValueError("Access denied: Invalid folder name / path traversal detected.")
+```
+
+#### 3. Server-Side Request Forgery (SSRF)
+*   **Vulnerability**: The proxy validation endpoint checked user-provided proxy servers by querying target test URLs directly from the host server.
+*   **Patch**: We added an IP validation helper `_is_safe_url` in [routes.py](Backend/features/proxies/routes.py) to resolve domains and block loopback, private local subnets, and link-local ranges:
+
+```python
+def _is_safe_url(url: str) -> bool:
+    from urllib.parse import urlparse
+    import socket, ipaddress
+    try:
+        host = urlparse(url).hostname
+        ip = socket.gethostbyname(host)
+        ip_obj = ipaddress.ip_address(ip)
+        return not (ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local)
+    except:
+        return False
+```
+
+---
+
+# Chapter 5: Project Milestones & Current Status
+
+*Summary: Current development status.*
+
+### Deployed & Working (Phase 1)
+*   ✅ **Decoupled execution engine** supporting parallel thread/async worker pools.
+*   ✅ **Resilient proxy rotator** with sticky session management and connection storm controls.
+*   ✅ **Security patches** covering IDOR, SSRF, and Directory Traversal.
+*   ✅ **Structured developer documents** organized under `agent_context/` and `dev_insights/` directory structures.
+
+### Active Sprint (Phase 2)
+*   🔜 **Generic multi-site parsing** engine using Playwright.
+*   🔜 **Background task worker queues** utilizing Redis.
+
+### Future Goals (Phase 3)
+*   🔮 **Intent-to-code compiler agent** using Local LLMs.
+*   🔮 **MicroVM execution sandboxing** using gVisor for dynamic logic runtimes.
+
+---
+*Developed with FastAPI, SQLModel, React Router v7, and a zero-trust security focus.*
