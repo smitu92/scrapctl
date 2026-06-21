@@ -1,7 +1,7 @@
 # ScrapCTL — Enterprise-Grade Web Scraping & Proxy Control Center
 
 <p align="center">
-  <img src="Frontend/public/scrapctl_logo.jpg" alt="ScrapCTL Logo" width="200" height="200" />
+  <img src="Frontend/public/logo.svg" alt="ScrapCTL Logo" width="200" height="200" />
 </p>
 
 ScrapCTL is a modular, high-concurrency e-commerce web scraping and proxy management platform. Built on a powerful **FastAPI** backend and a real-time **React Router v7** dashboard, ScrapCTL simplifies parallel web crawling, proxy health tracking, and automated IP rotation.
